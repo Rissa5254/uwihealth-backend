@@ -3,16 +3,16 @@ const bcrypt = require("bcrypt");
 
 // REGISTER
 async function register(req, res) {
-  const { fname, lname, email, password } = req.body;
+  const { fname, lname, email, password, role } = req.body;
 
   try {
     const hashedPassword = await bcrypt.hash(password, 10);
 
     const result = await pool.query(
-      `INSERT INTO Users (fname, lname, email, password)
-       VALUES ($1, $2, $3, $4)
-       RETURNING id, fname, lname, email`,
-      [fname, lname, email, hashedPassword]
+      `INSERT INTO Users (fname, lname, email, password,role)
+       VALUES ($1, $2, $3, $4, $5)
+       RETURNING id, fname, lname, email, role`,
+      [fname, lname, email, hashedPassword, role]
     );
 
     res.json(result.rows[0]);
@@ -24,7 +24,7 @@ async function register(req, res) {
 
 // LOGIN
 async function login(req, res) {
-  const { email, password } = req.body;
+  const { email, password,role } = req.body;
 
   try {
     const result = await pool.query(
@@ -37,6 +37,9 @@ async function login(req, res) {
     }
 
     const user = result.rows[0];
+    if (user.role !== role) {
+        return res.status(400).json({ error: "Invalid role selected" });
+      }
 
     const match = await bcrypt.compare(password, user.password);
 
