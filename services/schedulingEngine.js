@@ -9,23 +9,56 @@ function generateSlots(startTime, endTime, duration, buffer) {
   while (current < end) {
     slots.push(current.toTimeString().substring(0, 5));
 
-    current = new Date(
-      current.getTime() + (duration + buffer) * 60000
-    );
+      current = new Date(
+      current.getTime() + 15 * 60000  
+         );
   }
 
   return slots;
 }
 
-// Checks if a slot is taken
-async function isSlotAvailable(doctorId, date, time) {
-  const result = await pool.query(
-    `SELECT * FROM Schedule 
-     WHERE did = $1 AND sdate = $2 AND stime = $3 AND is_canceled = false`,
-    [doctorId, date, time]
+function getMinutes(duration, defaultValue = 10) {
+  if (!duration) return defaultValue;
+
+  const parts = duration.split(":");
+  return parseInt(parts[1]);
+}
+
+async function isSlotAvailable(doctorId, date, time, duration) {
+
+  const policy = await getPolicy();
+  const defaultDuration = policy?.appointmentduration || 10;
+  const bufferTime = policy?.buffertime || 0;
+
+  const existing = await pool.query(
+    `SELECT stime, duration 
+     FROM Schedule 
+     WHERE did = $1 AND sdate = $2 AND is_canceled = false`,
+    [doctorId, date]
   );
 
-  return result.rows.length === 0;
+  const newStart = new Date(`1970-01-01T${time}`);
+  const newEnd = new Date(
+  newStart.getTime() + getMinutes(duration, defaultDuration) * 60000
+);
+
+  for (const row of existing.rows) {
+
+    const existingStart = new Date(`1970-01-01T${row.stime}`);
+    const existingEnd = new Date(
+      existingStart.getTime() + getMinutes(row.duration, defaultDuration) * 60000
+    );
+
+    const existingEndWithBuffer = new Date(
+      existingEnd.getTime() + bufferTime * 60000
+    );
+
+    if (newStart < existingEndWithBuffer && newEnd > existingStart) {
+      return false;
+    }
+  }
+
+  return true; 
 }
 
 // Checks MAX per day
@@ -39,8 +72,19 @@ async function canBook(doctorId, date, maxDaily) {
   return parseInt(result.rows[0].count) < maxDaily;
 }
 
+async function getPolicy() {
+  const result = await pool.query(`
+    SELECT * FROM "Policies"
+    ORDER BY effective_date DESC
+    LIMIT 1
+  `);
+
+  return result.rows[0];
+}
+
 module.exports = {
   generateSlots,
   isSlotAvailable,
   canBook,
+  getPolicy
 };

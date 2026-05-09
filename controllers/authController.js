@@ -24,7 +24,7 @@ async function register(req, res) {
 
 // LOGIN
 async function login(req, res) {
-  const { email, password,role } = req.body;
+  const { email, password, role } = req.body;
 
   try {
     const result = await pool.query(
@@ -37,21 +37,23 @@ async function login(req, res) {
     }
 
     const user = result.rows[0];
+
     if (user.role !== role) {
-        return res.status(400).json({ error: "Invalid role selected" });
-      }
+      return res.status(400).json({ error: "Invalid role selected" });
+    }
 
     const match = await bcrypt.compare(password, user.password);
 
     if (!match) {
       return res.status(400).json({ error: "Invalid password" });
     }
-
     res.json({
       id: user.id,
       fname: user.fname,
       lname: user.lname,
       email: user.email,
+      role: user.role,
+      did: user.did 
     });
 
   } catch (err) {
