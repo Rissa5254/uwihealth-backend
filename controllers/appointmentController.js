@@ -10,7 +10,8 @@ const {
   getEstimatedWaitTime,
   getQueueStatus,
   getNowServing,
-  cancelAppointment
+  cancelAppointment,
+  getPolicy
 } = require("../services/queueManager");
 
 const { sendEmail } = require("../services/notificationService");
@@ -23,28 +24,29 @@ async function bookAppointment(req, res) {
   try {
     await client.query("BEGIN");
 
-    const available = await isSlotAvailable(doctorId, date, time);
+    const available = await isSlotAvailable(doctorId, date, time, duration);
     if (!available) {
       await client.query("ROLLBACK");
       return res.status(400).json({ message: "Sorry! Slot is not available. Please choose another time" });
     }
 
-    const allowed = await canBook(doctorId, date, 20);
+    const policy = await getPolicy();
+    const allowed = await canBook(doctorId, date, policy.maxdailyappointments);
     if (!allowed) {
       await client.query("ROLLBACK");
       return res.status(400).json({ message: "Max bookings reached" });
     }
     const existing = await client.query(
     `SELECT * FROM Schedule 
-    WHERE did = $1 AND sdate = $2 AND stime = $3 AND is_canceled = false`,
+    WHERE did = $1 AND sdate = $2 AND stime = $3 AND status = 'scheduled'`,
     [doctorId, date, time]);
 
     if (existing.rows.length > 0) {
         return res.status(400).json({ error: "Time slot already booked. Please choose another time" });}
 
     const result = await client.query(
-      `INSERT INTO Schedule (id, did, sdate, stime, duration, is_canceled)
-       VALUES ($1, $2, $3, $4, $5, false)
+      `INSERT INTO Schedule (id, did, sdate, stime, duration, status)
+       VALUES ($1, $2, $3, $4, $5, 'scheduled')
        RETURNING apid`,
       [userId, doctorId, date, time, duration]
     );
@@ -98,12 +100,11 @@ async function getMyAppointments(req, res) {
     const result = await pool.query(
       `SELECT apid, id, did, sdate, stime, duration, is_canceled
        FROM Schedule
-       WHERE id = $1 AND is_canceled = false
+       WHERE id = $1 
        ORDER BY sdate, stime`,
       [userId]
     );
-
-    res.json({ appointments: result.rows });
+    res.json(result.rows);
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Failed to fetch appointments" });
@@ -114,13 +115,13 @@ async function checkInPatient(req, res) {
   const { userId, appointmentId, doctorId, date } = req.body;
 
   try {
-    const position = await checkIn(userId, appointmentId, doctorId, date);
+    const result = await checkIn(userId, appointmentId, doctorId, date);
     
-
-    res.json({
-      message: "Checked in successfully",
-      queuePosition: position,
-    });
+res.json({
+  message: "Checked in successfully",
+  queuePosition: result.position,
+  ticketNumber: result.ticketNumber
+});
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Sorry! Check-in failed. Please try again." });
@@ -169,38 +170,38 @@ async function getWaitTime(req, res) {
   }
 }
 
-async function getQueue(req, res) {
-  const { doctorId, date} = req.params;
+const getQueue = async (req, res) => {
+  const { doctorId, date } = req.params;
 
   try {
     const queue = await getQueueStatus(doctorId, date);
 
-    if (queue.length === 0) {
-      return res.json({ message: "Sorry! There are no patients in queue" });
-    }
+    console.log("QUEUE DATA:", queue);
 
-    res.json({
-      doctorId,
-      queue,
-    });
+    res.json({ queue });
+
   } catch (err) {
     console.error(err);
-    res.status(500).json({ error: "Error! Failed to get queue" });
+    res.status(500).json({ error: "Failed to fetch queue" });
   }
-}
+};
 
-async function cancelAppt(req, res) {
-  const { appointmentId } = req.body;
+const cancelAppt = async (req, res) => {
+  const { appointmentId, doctorId, date } = req.body;
+
+  console.log("CANCEL HIT:", appointmentId);
 
   try {
-    const result = await cancelAppointment(appointmentId);
-
-    if (!result) {
-      return res.json({ message: " Sorry! Unable to locate appointment in queue" });
-    }
+    // 1. mark appointment as canceled
+    await pool.query(
+  `UPDATE schedule SET status = 'canceled', is_canceled = true WHERE apid = $1`,
+  [appointmentId]
+    );
+    // 2. update queue positions and get updated queue
+    const updatedQueue = await cancelAppointment(appointmentId, doctorId, date);
 
     const UserResult = await pool.query(
-      `SELECT u.email, u.first_name, s.date, s.time
+      `SELECT u.email, u.first_name, s.sdate, s.stime
       FROM schedule s
       JOIN users u ON s.id = u.id
       WHERE s.apid = $1`,
@@ -214,6 +215,7 @@ async function cancelAppt(req, res) {
         "Appointment Cancelled",
         `Hello ${first_name},
         Your appointment for ${sdate} at ${stime} has been cancelled.
+        
         If this was a mistake, you can log in to reschedule at any time.
         
         Thank you and have a great day.
@@ -222,34 +224,28 @@ async function cancelAppt(req, res) {
         UWI Health Centre` 
     );
 
+    // 3. send updated queue to frontend
     res.json({
-      message: "Appointment cancelled and queue updated",
-      removedPosition: result
+      message: "Appointment cancelled successfully",
+      queue: updatedQueue
     });
+
   } catch (err) {
     console.error(err);
-    res.status(500).json({ error: "Cancellation failed" });
+    res.status(500).json({ error: "Cancel failed" });
   }
-}
+};
 
-//Maybe
 async function nowServing(req, res) {
   const { doctorId, date } = req.params;
 
   try {
     const result = await getNowServing(doctorId, date);
 
-    if (!result) {
-      return res.json({ message: "No patients are currently being served" });
-    }
-
-    res.json({
-      doctorId,
-      nowServing: {
-        queue_position: result.queue_position,
-        patientName: `${result.fname} ${result.lname}`
-      }
-    });
+  res.json({
+  doctorId,
+  nowServing: result
+});
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Error getting now serving" });

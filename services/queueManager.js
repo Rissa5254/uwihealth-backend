@@ -1,5 +1,29 @@
 const pool = require("../config/db");
 
+function generateTicketNumber(position) {
+  return `W${String(position).padStart(3, "0")}`;
+}
+
+async function getAverageServiceTime(doctorId) {
+  const result = await pool.query(`
+    SELECT AVG(EXTRACT(EPOCH FROM s.duration)/60) AS avg_duration
+    FROM Schedule s
+    WHERE s.did = $1 AND s.is_canceled = false
+  `, [doctorId]);
+
+  return parseFloat(result.rows[0].avg_duration) || null;
+}
+
+async function getPolicy() {
+  const result = await pool.query(`
+    SELECT * FROM "Policies"
+    ORDER BY effective_date DESC
+    LIMIT 1
+  `);
+
+  return result.rows[0];
+}
+
 // CHECK-IN
 
 async function checkIn(userId, apptId, doctorId, date) {
@@ -24,22 +48,37 @@ async function checkIn(userId, apptId, doctorId, date) {
        FROM Check_in ci
        JOIN Schedule s ON ci.apid = s.apid
        WHERE s.did = $1 AND DATE(s.sdate) = $2`,
-      [doctorId, date]);
+      [doctorId, date]
+    );
 
     const position = result.rows[0].max_pos + 1;
+    const ticketResult = await pool.query(`
+  SELECT MAX(ticket_number) AS last_ticket
+  FROM check_in
+`);
+
+let nextNumber = 1;
+
+if (ticketResult.rows[0].last_ticket) {
+  const last = ticketResult.rows[0].last_ticket;
+  nextNumber = parseInt(last.replace("W", "")) + 1;
+}
+
+const ticketNumber = `W${String(nextNumber).padStart(3, "0")}`;
+
     console.log("Doctor:", doctorId);
     console.log("Date:", date);
     console.log("Max position:", result.rows[0].max_pos);
 
     await client.query(
-      `INSERT INTO Check_in (id, apid, queue_position, status)
-       VALUES ($1, $2, $3, 'Waiting')`,
-      [userId, apptId, position]
+      `INSERT INTO Check_in (id, apid, queue_position, ticket_number, status)
+       VALUES ($1, $2, $3, $4, 'Waiting')`,
+      [userId, apptId, position, ticketNumber]
     );
 
     await client.query("COMMIT");
 
-    return position;
+    return { position, ticketNumber };
 
   } catch (err) {
     await client.query("ROLLBACK");
@@ -51,7 +90,6 @@ async function checkIn(userId, apptId, doctorId, date) {
 
 // COMPLETE APPOINTMENT
 async function completeAppointment(doctorId, date) {
-  // 1. Find current patient
   const current = await pool.query(
     `SELECT ci.apid, ci.queue_position, ci.id AS user_id, s.did AS doctor_id, s.sdate
      FROM Check_in ci
@@ -64,8 +102,36 @@ async function completeAppointment(doctorId, date) {
   );
 
   if (current.rows.length === 0) {
+  // fallback: completes first scheduled appointment instead
+  const fallback = await pool.query(
+    `SELECT apid, id AS user_id, did AS doctor_id, sdate
+     FROM Schedule
+     WHERE did = $1
+     AND DATE(sdate) = DATE($2)
+     AND status = 'scheduled'
+     ORDER BY stime ASC
+     LIMIT 1`,
+    [doctorId, date]
+  );
+
+  if (fallback.rows.length === 0) {
     return null;
   }
+
+  const { apid, user_id, doctor_id, sdate } = fallback.rows[0];
+
+  await pool.query(
+    `UPDATE Schedule 
+     SET status = 'completed'
+     WHERE apid = $1`,
+    [apid]
+  );
+
+  return {
+    completed: apid,
+    nowServing: null
+  };
+}
 
   const {
     apid,
@@ -75,21 +141,27 @@ async function completeAppointment(doctorId, date) {
     sdate
   } = current.rows[0];
 
-  // 2. INSERT into Completed_Appointments Table
   await pool.query(
     `INSERT INTO Completed_Appointments (apid, user_id, doctor_id, date)
      VALUES ($1, $2, $3, $4)`,
     [apid, user_id, doctor_id, sdate]
   );
 
-  // 3. DELETE from Check_in
+  await pool.query(
+  `UPDATE Schedule 
+   SET status = 'completed' 
+   WHERE apid = $1`,
+  [apid]
+);
+
   await pool.query(
     `DELETE FROM Check_in
      WHERE apid = $1`,
     [apid]
   );
 
-  // 4. SHIFT queue positions
+  
+
   await pool.query(
     `UPDATE Check_in
      SET queue_position = queue_position - 1
@@ -97,9 +169,8 @@ async function completeAppointment(doctorId, date) {
     [queue_position]
   );
 
-  // 5. Get next patient
   const next = await pool.query(
-    `SELECT ci.queue_position, u.fname, u.lname
+    `SELECT ci.queue_position, ci.ticket_number, u.fname, u.lname
      FROM Check_in ci
      JOIN Schedule s ON ci.apid = s.apid
      JOIN Users u ON ci.id = u.id
@@ -115,6 +186,7 @@ async function completeAppointment(doctorId, date) {
   if (next.rows.length > 0) {
     nowServing = {
       queue_position: next.rows[0].queue_position,
+      ticket_number: next.rows[0].ticket_number,
       patientName: `${next.rows[0].fname} ${next.rows[0].lname}`
     };
   }
@@ -149,7 +221,6 @@ async function getEstimatedWaitTime(doctorId, date) {
 }
 
 async function promoteFromWaitlist(doctorId, date) {
-  // 1. Gets the first person in waitlist
   const waitlist = await pool.query(
     `SELECT * FROM Waitlist 
      WHERE did = $1 AND wdate = $2 
@@ -165,7 +236,6 @@ async function promoteFromWaitlist(doctorId, date) {
 
   const person = waitlist.rows[0];
 
-  // 2. Insert into Schedule
   const result = await pool.query(
     `INSERT INTO Schedule (id, did, sdate, stime, duration, is_canceled)
      VALUES ($1, $2, $3, $4, $5, false)
@@ -179,7 +249,6 @@ async function promoteFromWaitlist(doctorId, date) {
     ]
   );
 
-  // 3. Remove from waitlist
   await pool.query(
     `DELETE FROM Waitlist WHERE wid = $1`,
     [person.wid]
@@ -194,6 +263,7 @@ async function getQueueStatus(doctorId, date) {
   const result = await pool.query(
     `SELECT 
         ci.queue_position,
+        ci.ticket_number,
         u.fname,
         u.lname,
         s.stime,
@@ -201,30 +271,62 @@ async function getQueueStatus(doctorId, date) {
      FROM Check_in ci
      JOIN Schedule s ON ci.apid = s.apid
      JOIN Users u ON ci.id = u.id
-     WHERE s.did = $1 AND DATE(s.sdate) = DATE($2)
+     WHERE s.did = $1 AND DATE(s.sdate) = $2::date
      ORDER BY ci.queue_position ASC`,
     [doctorId, date]
   );
+  console.log("DoctorId from API:", doctorId);
+  console.log("Date from API:", date);
+
+  const policyResult = await pool.query(`
+    SELECT * FROM "Policies"
+    ORDER BY effective_date DESC
+    LIMIT 1
+  `);
+
+  const policy = policyResult.rows[0];
+
+  // GETs HISTORICAL AVERAGE ONCE
+  const avgResult = await pool.query(`
+    SELECT AVG(EXTRACT(EPOCH FROM s.duration)/60) AS avg_duration
+    FROM Schedule s
+    WHERE s.did = $1 AND s.is_canceled = false
+  `, [doctorId]);
+
+  const avgServiceTime = parseFloat(avgResult.rows[0].avg_duration);
 
   let cumulativeTime = 0;
+  const queue = [];
 
-  const queue = result.rows.map((row, index) => {
+  for (const row of result.rows) {
     const waitTime = cumulativeTime;
-    cumulativeTime += row.duration;
 
-    return {
+    let durationMinutes = 10; // default fallback
+
+    if (avgServiceTime && !isNaN(avgServiceTime)) {
+      durationMinutes = avgServiceTime;
+    } 
+    else if (row.duration) {
+      durationMinutes = parseInt(row.duration.split(":")[1]);
+    } 
+    else if (policy && policy.appointmentduration) {
+      durationMinutes = policy.appointmentduration;
+    }
+
+    cumulativeTime += durationMinutes;
+
+    queue.push({
       queue_position: row.queue_position,
+      ticket_number: row.ticket_number,
       patientName: `${row.fname} ${row.lname}`,
       appointmentTime: row.stime,
-      estimatedWait: waitTime
-    };
-  });
-
+      estimatedWait: Math.round(waitTime)
+    });
+  }
   return queue;
 }
 
-async function cancelAppointment(apid) {
-  // 1. Get the queue position BEFORE deleting
+async function cancelAppointment(apid, doctorId, date) {
   const result = await pool.query(
     `SELECT queue_position 
      FROM Check_in 
@@ -238,14 +340,14 @@ async function cancelAppointment(apid) {
 
   const removedPosition = result.rows[0].queue_position;
 
-  // 2. Delete from queue
+  // remove from queue
   await pool.query(
     `DELETE FROM Check_in 
      WHERE apid = $1`,
     [apid]
   );
 
-  // 3. Shift everyone behind forward
+  // shift positions
   await pool.query(
     `UPDATE Check_in
      SET queue_position = queue_position - 1
@@ -253,15 +355,16 @@ async function cancelAppointment(apid) {
     [removedPosition]
   );
 
-  return removedPosition;
+  const updatedQueue = await getQueueStatus(doctorId, date);
+
+  return updatedQueue;
 }
 
-//Maybe
 async function getNowServing(doctorId, date) {
-  // 1. Try to find someone In-Progress
   const current = await pool.query(
     `SELECT 
         ci.queue_position,
+        ci.ticket_number,
         u.fname,
         u.lname
      FROM Check_in ci
@@ -274,11 +377,11 @@ async function getNowServing(doctorId, date) {
     [doctorId, date]
   );
 
-  // 2. If none, get first Waiting
   if (current.rows.length === 0) {
     const next = await pool.query(
       `SELECT 
           ci.queue_position,
+          ci.ticket_number,
           u.fname,
           u.lname
        FROM Check_in ci
@@ -292,10 +395,20 @@ async function getNowServing(doctorId, date) {
       [doctorId, date]
     );
 
-    return next.rows[0] || null;
+    return next.rows[0]
+      ? {
+          queue_position: next.rows[0].queue_position,
+          ticket_number: next.rows[0].ticket_number,
+          patientName: `${next.rows[0].fname} ${next.rows[0].lname}`
+        }
+      : null;
   }
 
-  return current.rows[0];
+  return {
+    queue_position: current.rows[0].queue_position,
+    ticket_number: current.rows[0].ticket_number,
+    patientName: `${current.rows[0].fname} ${current.rows[0].lname}`
+  };
 }
 
 module.exports = {
@@ -305,5 +418,6 @@ module.exports = {
   promoteFromWaitlist,
   getQueueStatus,
   cancelAppointment,
-  getNowServing
+  getNowServing,
+  getPolicy
 };
