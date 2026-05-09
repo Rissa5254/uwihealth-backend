@@ -39,8 +39,23 @@ async function canBook(doctorId, date, maxDaily) {
   return parseInt(result.rows[0].count) < maxDaily;
 }
 
+// Get appointment remainders
+async function getAppointmentRemainders(){
+  const result = await pool.query(
+    `SELECT s.*, u.email, u.first_name 
+    FROM Schedule s 
+    JOIN users u ON s.id = u.id 
+    WHERE s.sdate = CURRENT_DATE 
+    AND s.stime > CURRENT_TIME 
+    AND s.stime <= (CURRENT_TIME + INTERVAL '1 hour')
+    AND s.is_canceled = false`
+  );
+  return result.rows;
+}
+
 module.exports = {
   generateSlots,
   isSlotAvailable,
   canBook,
+  getAppointmentRemainders,
 };

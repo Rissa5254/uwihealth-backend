@@ -1,38 +1,27 @@
-import nodemailer from "nodemailer";
+const nodemailer = require("nodemailer");
 
 const transporter = nodemailer.createTransport({
-    service: "gmail",
+    host: process.env.EMAIL_HOST,
+    port: process.env.EMAIL_PORT,
     auth: {
-        user: "your_email",
-        pass: "your_password"
+        user: process.env.EMAIL_USER,         
+        pass: process.env.EMAIL_PASS          
     }
 });
 
 // Sending
-export const sendEmail = async(email, subject, message) => {
-    await transporter.sendMail({
-        from: "UWI Health Centre",
-        to: email,
-        subject,
-        text: message
-    });
+const sendEmail = async(email, subject, message) => {
+    try{
+        await transporter.sendMail({
+            from: '"UWI Health Centre" <no-reply@uwi.edu>',
+            to: email,
+            subject: subject,
+            text: message
+        });
+        console.log(`Mail successfully trapped for: ${email}`);
+    } catch(error){
+        console.error("Mailtrap Connection Error:", error);
+    }
 };
 
-// Booking
-async function bookAppointment(){
-    await sendEmail(
-        user.email,
-        "Appointment Confirmed",
-        `Your appointment is booked for ${date} at ${time}.`
-    );
-}
-
-// Cancelling
-async function bookAppointment(){
-    await sendEmail(
-        user.email,
-        "Appointment Cancelled",
-        `Your appointment for ${date} at ${time} has been cancelled.`  
-    );
-}
-
+module.exports = { sendEmail };
