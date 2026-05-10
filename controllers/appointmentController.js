@@ -36,9 +36,14 @@ async function bookAppointment(req, res) {
       return res.status(400).json({ message: "Max bookings reached" });
     }
     const existing = await client.query(
-    `SELECT * FROM Schedule 
-    WHERE did = $1 AND sdate = $2 AND stime = $3 AND status = 'scheduled'`,
-    [doctorId, date, time]);
+  `SELECT * FROM Schedule 
+   WHERE did = $1
+   AND sdate >= $2::date
+   AND sdate < ($2::date + INTERVAL '1 day')
+   AND stime = $3
+   AND status = 'scheduled'`,
+  [doctorId, date, time]
+);
 
     if (existing.rows.length > 0) {
         return res.status(400).json({ error: "Time slot already booked. Please choose another time" });}
@@ -72,7 +77,7 @@ async function getMyAppointments(req, res) {
 
   try {
     const result = await pool.query(
-      `SELECT apid, id, did, sdate, stime, duration, is_canceled
+      `SELECT apid, id, did, sdate, stime, duration,status, is_canceled
        FROM Schedule
        WHERE id = $1 
        ORDER BY sdate, stime`,
@@ -168,13 +173,27 @@ const cancelAppt = async (req, res) => {
   try {
     // 1. mark appointment as canceled
     await pool.query(
-  `UPDATE schedule SET status = 'canceled', is_canceled = true WHERE apid = $1`,
-  [appointmentId]
+      `UPDATE schedule SET status = 'canceled', is_canceled = true WHERE apid = $1`,
+      [appointmentId]
     );
-    // 2. update queue positions and get updated queue
-    const updatedQueue = await cancelAppointment(appointmentId, doctorId, date);
 
-    // 3. send updated queue to frontend
+    // fetch correct doctorId + date from DB 
+    const appt = await pool.query(
+      `SELECT did, sdate FROM Schedule WHERE apid = $1`,
+      [appointmentId]
+    );
+
+    const doctorIdFinal = doctorId || appt.rows[0].did;
+    const dateFinal = date || appt.rows[0].sdate;
+
+    // update queue using correct values
+    const updatedQueue = await cancelAppointment(
+      appointmentId,
+      doctorIdFinal,
+      dateFinal
+    );
+
+    // 4. send response
     res.json({
       message: "Appointment cancelled successfully",
       queue: updatedQueue

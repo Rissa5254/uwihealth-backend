@@ -47,24 +47,31 @@ async function checkIn(userId, apptId, doctorId, date) {
       `SELECT COALESCE(MAX(ci.queue_position), 0) AS max_pos
        FROM Check_in ci
        JOIN Schedule s ON ci.apid = s.apid
-       WHERE s.did = $1 AND DATE(s.sdate) = $2`,
+       WHERE s.did = $1
+       AND s.sdate >= $2::date
+       AND s.sdate < ($2::date + INTERVAL '1 day')`,
       [doctorId, date]
     );
 
     const position = result.rows[0].max_pos + 1;
-    const ticketResult = await pool.query(`
-  SELECT MAX(ticket_number) AS last_ticket
-  FROM check_in
-`);
 
-let nextNumber = 1;
+    const ticketResult = await client.query(`
+      SELECT MAX(ci.ticket_number) AS last_ticket
+      FROM check_in ci
+      JOIN Schedule s ON ci.apid = s.apid
+      WHERE s.did = $1
+      AND s.sdate >= $2::date
+      AND s.sdate < ($2::date + INTERVAL '1 day')
+    `, [doctorId, date]);
 
-if (ticketResult.rows[0].last_ticket) {
-  const last = ticketResult.rows[0].last_ticket;
-  nextNumber = parseInt(last.replace("W", "")) + 1;
-}
+    let nextNumber = 1;
 
-const ticketNumber = `W${String(nextNumber).padStart(3, "0")}`;
+    if (ticketResult.rows[0].last_ticket) {
+      const last = ticketResult.rows[0].last_ticket;
+      nextNumber = parseInt(last.replace("W", "")) + 1;
+    }
+
+    const ticketNumber = `W${String(nextNumber).padStart(3, "0")}`;
 
     console.log("Doctor:", doctorId);
     console.log("Date:", date);
@@ -95,7 +102,8 @@ async function completeAppointment(doctorId, date) {
      FROM Check_in ci
      JOIN Schedule s ON ci.apid = s.apid
      WHERE s.did = $1
-       AND DATE(s.sdate) = DATE($2)
+       AND s.sdate >= $2::date
+       AND s.sdate < ($2::date + INTERVAL '1 day')
      ORDER BY ci.queue_position ASC
      LIMIT 1`,
     [doctorId, date]
@@ -107,7 +115,8 @@ async function completeAppointment(doctorId, date) {
     `SELECT apid, id AS user_id, did AS doctor_id, sdate
      FROM Schedule
      WHERE did = $1
-     AND DATE(sdate) = DATE($2)
+     AND sdate >= $2::date
+     AND sdate < ($2::date + INTERVAL '1 day')
      AND status = 'scheduled'
      ORDER BY stime ASC
      LIMIT 1`,
@@ -175,7 +184,8 @@ async function completeAppointment(doctorId, date) {
      JOIN Schedule s ON ci.apid = s.apid
      JOIN Users u ON ci.id = u.id
      WHERE s.did = $1
-       AND DATE(s.sdate) = DATE($2)
+       AND s.sdate >= $2::date
+       AND s.sdate < ($2::date + INTERVAL '1 day')
      ORDER BY ci.queue_position ASC
      LIMIT 1`,
     [doctorId, date]
@@ -202,7 +212,9 @@ async function getEstimatedWaitTime(doctorId, date) {
   const result = await pool.query(
     `SELECT AVG(s.duration) AS avg_duration
      FROM Schedule s
-     WHERE s.did = $1 AND DATE(s.sdate) = DATE($2)`,
+     WHERE s.did = $1
+     AND s.sdate >= $2::date
+     AND s.sdate < ($2::date + INTERVAL '1 day')`,
     [doctorId, date]
   );
 
@@ -211,7 +223,7 @@ async function getEstimatedWaitTime(doctorId, date) {
   const queue = await pool.query(
     `SELECT COUNT(*) FROM Check_in ci
      JOIN Schedule s ON ci.apid = s.apid
-     WHERE s.did = $1 AND DATE(s.sdate) = DATE($2)`,
+     WHERE s.did = $1 AND s.sdate >= $2::date AND s.sdate < ($2::date + INTERVAL '1 day')`,
     [doctorId, date]
   );
 
@@ -260,21 +272,23 @@ async function promoteFromWaitlist(doctorId, date) {
 }
 
 async function getQueueStatus(doctorId, date) {
-  const result = await pool.query(
-    `SELECT 
-        ci.queue_position,
-        ci.ticket_number,
-        u.fname,
-        u.lname,
-        s.stime,
-        s.duration
-     FROM Check_in ci
-     JOIN Schedule s ON ci.apid = s.apid
-     JOIN Users u ON ci.id = u.id
-     WHERE s.did = $1 AND DATE(s.sdate) = $2::date
-     ORDER BY ci.queue_position ASC`,
-    [doctorId, date]
-  );
+ const result = await pool.query(
+  `SELECT 
+      ci.queue_position,
+      ci.ticket_number,
+      u.fname,
+      u.lname,
+      s.stime,
+      s.duration
+   FROM Check_in ci
+   JOIN Schedule s ON ci.apid = s.apid
+   JOIN Users u ON ci.id = u.id
+   WHERE s.did = $1
+   AND s.sdate >= $2::date
+   AND s.sdate < ($2::date + INTERVAL '1 day')
+   ORDER BY ci.queue_position ASC`,
+  [doctorId, date]
+);
   console.log("DoctorId from API:", doctorId);
   console.log("Date from API:", date);
 
@@ -371,7 +385,8 @@ async function getNowServing(doctorId, date) {
      JOIN Schedule s ON ci.apid = s.apid
      JOIN Users u ON ci.id = u.id
      WHERE s.did = $1
-       AND DATE(s.sdate) = DATE($2)
+       AND s.sdate >= $2::date
+       AND s.sdate < ($2::date + INTERVAL '1 day')
        AND ci.status = 'In-Progress'
      LIMIT 1`,
     [doctorId, date]
@@ -388,7 +403,8 @@ async function getNowServing(doctorId, date) {
        JOIN Schedule s ON ci.apid = s.apid
        JOIN Users u ON ci.id = u.id
        WHERE s.did = $1
-         AND DATE(s.sdate) = DATE($2)
+         AND s.sdate >= $2::date
+         AND s.sdate < ($2::date + INTERVAL '1 day')
          AND ci.status = 'Waiting'
        ORDER BY ci.queue_position ASC
        LIMIT 1`,
