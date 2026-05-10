@@ -75,7 +75,7 @@ async function canBook(doctorId, date, maxDaily) {
 // Get appointment remainders
 async function getAppointmentRemainders(){
   const result = await pool.query(
-    `SELECT s.*, u.email, u.first_name 
+    `SELECT s.*, u.email, u.fname 
     FROM Schedule s 
     JOIN users u ON s.id = u.id 
     WHERE s.sdate = CURRENT_DATE 
