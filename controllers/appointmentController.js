@@ -14,6 +14,7 @@ const {
   getPolicy
 } = require("../services/queueManager");
 
+const { sendEmail } = require("../services/notificationService");
 
 async function bookAppointment(req, res) {
   const { userId, doctorId, date, time, duration } = req.body;
@@ -56,6 +57,31 @@ async function bookAppointment(req, res) {
     );
 
     await client.query("COMMIT");
+
+    const UserResult = await client.query(
+      `SELECT email, fname FROM users WHERE id = $1`,
+      [userId]
+    );
+
+    const { email, fname } = UserResult.rows[0];
+
+    // Send confirmation email
+    await sendEmail(
+      email,
+      "Appointment Confirmed",
+    `Good day ${fname},
+    Your appointment is booked for ${date} at ${time}. You will receive a reminder before your appointment.
+      
+    Before you arrive:
+    - Bring your UWI Student ID (mandatory).
+    - Arrive 15 minutes early to complete a check-in.
+    - If you have fever or flu-like symptoms, please wear a mask.
+    
+    We look forward to seeing you. Thank you.
+    
+    Regards,
+    UWI Health Centre`
+    );
 
     res.json({
       message: "Success! Appointment is booked",
@@ -194,6 +220,31 @@ const cancelAppt = async (req, res) => {
     );
 
     // 4. send response
+    const UserResult = await pool.query(
+      `SELECT u.email, u.fname, s.sdate, s.stime
+      FROM schedule s
+      JOIN users u ON s.id = u.id
+      WHERE s.apid = $1`,
+      [appointmentId]
+    );
+
+    const { email, fname, sdate, stime} = UserResult.rows[0];
+
+    await sendEmail(
+      email,
+      "Appointment Cancelled",
+    `Good day ${fname},
+    Your appointment for ${sdate} at ${stime} has been cancelled.
+      
+    If this was a mistake, you can log in to reschedule at any time.
+    
+    Thank you and have a great day.
+    
+    Regards,
+    UWI Health Centre` 
+    );
+
+    // 3. send updated queue to frontend
     res.json({
       message: "Appointment cancelled successfully",
       queue: updatedQueue

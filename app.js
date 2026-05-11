@@ -3,6 +3,8 @@ require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
 
+require("./services/reminderService");
+
 const appointmentRoutes = require("./routes/appointmentRoutes");
 
 const app = express();

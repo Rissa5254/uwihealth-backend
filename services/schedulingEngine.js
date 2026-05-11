@@ -39,8 +39,8 @@ async function isSlotAvailable(doctorId, date, time, duration) {
 
   const newStart = new Date(`1970-01-01T${time}`);
   const newEnd = new Date(
-  newStart.getTime() + getMinutes(duration, defaultDuration) * 60000
-);
+    newStart.getTime() + getMinutes(duration, defaultDuration) * 60000
+  );
 
   for (const row of existing.rows) {
 
@@ -72,6 +72,21 @@ async function canBook(doctorId, date, maxDaily) {
   return parseInt(result.rows[0].count) < maxDaily;
 }
 
+// Get appointment remainders
+async function getAppointmentRemainders(){
+  const result = await pool.query(
+    `SELECT s.*, u.email, u.fname 
+    FROM Schedule s 
+    JOIN users u ON s.id = u.id 
+    WHERE s.sdate = CURRENT_DATE 
+    AND s.stime > CURRENT_TIME 
+    AND s.stime <= (CURRENT_TIME + INTERVAL '1 hour')
+    AND s.is_canceled = false`
+  );
+
+  return result.rows;
+}
+
 async function getPolicy() {
   const result = await pool.query(`
     SELECT * FROM "Policies"
@@ -86,5 +101,6 @@ module.exports = {
   generateSlots,
   isSlotAvailable,
   canBook,
-  getPolicy
+  getAppointmentRemainders,
+  getPolicy,
 };
