@@ -1,6 +1,8 @@
 const pool = require("../config/db");
 const bcrypt = require("bcrypt");
 
+let email1= "";
+
 // REGISTER
 async function register(req, res) {
   const { fname, lname, email, password, role } = req.body;
@@ -21,10 +23,29 @@ async function register(req, res) {
     res.status(500).json({ error: "Registration failed" });
   }
 }
+// async function get_id_by_email() {
+//   try {
+//     const result = await pool.query(
+//       `SELECT id FROM Users WHERE email = $1`,
+//       [email1]
+//     );
+//     return result.rows[0].id;
+//   } catch (err) {
+//     console.error(err);
+//     throw new Error("Failed to get user ID by email");
+//   }
+// }
+// // LOGIN
+// async function getEmail(req,res){
+//   //email= req.body.email;
+//   email=res["email"];
+//  // res.json({ email: email1 });
+//   return email
+// }
 
-// LOGIN
 async function login(req, res) {
   const { email, password, role } = req.body;
+  email1 = email;
 
   try {
     const result = await pool.query(
@@ -55,7 +76,7 @@ async function login(req, res) {
       role: user.role,
       did: user.did 
     });
-
+  //email1= getEmail(req,res)
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Login failed" });

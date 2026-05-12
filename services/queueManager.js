@@ -1,8 +1,13 @@
+
 const pool = require("../config/db");
+const { predictDuration } = require("./aiService");
+
+//let { email1 } = require("../controllers/authController");
 
 function generateTicketNumber(position) {
   return `W${String(position).padStart(3, "0")}`;
 }
+
 
 async function getAverageServiceTime(doctorId) {
   const result = await pool.query(`
@@ -110,37 +115,36 @@ async function completeAppointment(doctorId, date) {
   );
 
   if (current.rows.length === 0) {
-  // fallback: completes first scheduled appointment instead
-  const fallback = await pool.query(
-    `SELECT apid, id AS user_id, did AS doctor_id, sdate
-     FROM Schedule
-     WHERE did = $1
-     AND sdate >= $2::date
-     AND sdate < ($2::date + INTERVAL '1 day')
-     AND status = 'scheduled'
-     ORDER BY stime ASC
-     LIMIT 1`,
-    [doctorId, date]
-  );
+    const fallback = await pool.query(
+      `SELECT apid, id AS user_id, did AS doctor_id, sdate
+       FROM Schedule
+       WHERE did = $1
+       AND sdate >= $2::date
+       AND sdate < ($2::date + INTERVAL '1 day')
+       AND status = 'scheduled'
+       ORDER BY stime ASC
+       LIMIT 1`,
+      [doctorId, date]
+    );
 
-  if (fallback.rows.length === 0) {
-    return null;
+    if (fallback.rows.length === 0) {
+      return null;
+    }
+
+    const { apid, user_id, doctor_id, sdate } = fallback.rows[0];
+
+    await pool.query(
+      `UPDATE Schedule 
+       SET status = 'completed'
+       WHERE apid = $1`,
+      [apid]
+    );
+
+    return {
+      completed: apid,
+      nowServing: null
+    };
   }
-
-  const { apid, user_id, doctor_id, sdate } = fallback.rows[0];
-
-  await pool.query(
-    `UPDATE Schedule 
-     SET status = 'completed'
-     WHERE apid = $1`,
-    [apid]
-  );
-
-  return {
-    completed: apid,
-    nowServing: null
-  };
-}
 
   const {
     apid,
@@ -157,19 +161,17 @@ async function completeAppointment(doctorId, date) {
   );
 
   await pool.query(
-  `UPDATE Schedule 
-   SET status = 'completed' 
-   WHERE apid = $1`,
-  [apid]
-);
+    `UPDATE Schedule 
+     SET status = 'completed' 
+     WHERE apid = $1`,
+    [apid]
+  );
 
   await pool.query(
     `DELETE FROM Check_in
      WHERE apid = $1`,
     [apid]
   );
-
-  
 
   await pool.query(
     `UPDATE Check_in
@@ -272,23 +274,24 @@ async function promoteFromWaitlist(doctorId, date) {
 }
 
 async function getQueueStatus(doctorId, date) {
- const result = await pool.query(
-  `SELECT 
-      ci.queue_position,
-      ci.ticket_number,
-      u.fname,
-      u.lname,
-      s.stime,
-      s.duration
-   FROM Check_in ci
-   JOIN Schedule s ON ci.apid = s.apid
-   JOIN Users u ON ci.id = u.id
-   WHERE s.did = $1
-   AND s.sdate >= $2::date
-   AND s.sdate < ($2::date + INTERVAL '1 day')
-   ORDER BY ci.queue_position ASC`,
-  [doctorId, date]
-);
+  const result = await pool.query(
+    `SELECT 
+        ci.queue_position,
+        ci.ticket_number,
+        u.fname,
+        u.lname,
+        s.stime,
+        s.duration
+     FROM Check_in ci
+     JOIN Schedule s ON ci.apid = s.apid
+     JOIN Users u ON ci.id = u.id
+     WHERE s.did = $1
+     AND s.sdate >= $2::date
+     AND s.sdate < ($2::date + INTERVAL '1 day')
+     ORDER BY ci.queue_position ASC`,
+    [doctorId, date]
+  );
+
   console.log("DoctorId from API:", doctorId);
   console.log("Date from API:", date);
 
@@ -300,7 +303,6 @@ async function getQueueStatus(doctorId, date) {
 
   const policy = policyResult.rows[0];
 
-  // GETs HISTORICAL AVERAGE ONCE
   const avgResult = await pool.query(`
     SELECT AVG(EXTRACT(EPOCH FROM s.duration)/60) AS avg_duration
     FROM Schedule s
@@ -311,20 +313,28 @@ async function getQueueStatus(doctorId, date) {
 
   let cumulativeTime = 0;
   const queue = [];
+  const queueLength = result.rows.length;
 
-  for (const row of result.rows) {
+  for (let i = 0; i < result.rows.length; i++) {
+    const row = result.rows[i];
     const waitTime = cumulativeTime;
 
-    let durationMinutes = 10; // default fallback
+    let durationMinutes = 10;
 
-    if (avgServiceTime && !isNaN(avgServiceTime)) {
-      durationMinutes = avgServiceTime;
-    } 
-    else if (row.duration) {
-      durationMinutes = parseInt(row.duration.split(":")[1]);
-    } 
-    else if (policy && policy.appointmentduration) {
-      durationMinutes = policy.appointmentduration;
+    try {
+      durationMinutes = await predictDuration(queueLength, waitTime);
+    } catch (err) {
+      console.error("AI fallback:", err);
+
+      if (avgServiceTime && !isNaN(avgServiceTime)) {
+        durationMinutes = avgServiceTime;
+      } 
+      else if (row.duration) {
+        durationMinutes = parseInt(row.duration.split(":")[1]);
+      } 
+      else if (policy && policy.appointmentduration) {
+        durationMinutes = policy.appointmentduration;
+      }
     }
 
     cumulativeTime += durationMinutes;
@@ -337,6 +347,7 @@ async function getQueueStatus(doctorId, date) {
       estimatedWait: Math.round(waitTime)
     });
   }
+
   return queue;
 }
 
@@ -354,14 +365,12 @@ async function cancelAppointment(apid, doctorId, date) {
 
   const removedPosition = result.rows[0].queue_position;
 
-  // remove from queue
   await pool.query(
     `DELETE FROM Check_in 
      WHERE apid = $1`,
     [apid]
   );
 
-  // shift positions
   await pool.query(
     `UPDATE Check_in
      SET queue_position = queue_position - 1
@@ -426,6 +435,34 @@ async function getNowServing(doctorId, date) {
     patientName: `${current.rows[0].fname} ${current.rows[0].lname}`
   };
 }
+
+// async function getqueueLength() {
+//  const userId = await get_id_by_email();
+//  const date = new Date("2024-12-25");
+//   const appointment_id = await pool.query(
+//     `SELECT appointment_id FROM schedule WHERE 
+//     id = $1 AND sdate = $2`,
+//     [userIdd, date]
+//   );
+ 
+//   const qid = await pool.query(
+//     `SELECT qid FROM Check_in WHERE 
+//     appointment_id = $1 AND sdate = $2`,
+//     [appointment_id, date]
+//   );
+//  const queue_position= await pool.query(
+//     `SELECT queue_position FROM Check_in WHERE status = 'waiting'
+//     qid = $1`,
+//     [qid]
+//   );
+//   return parseInt(queueposition.rows[0].count, 10);
+// }
+
+// async function getwaitingTime() {
+//   let queueLength = await getqueueLength();
+//   const avgServiceTime = 10; // Fallback average service time in minutes
+//   return queueLength * avgServiceTime;
+// }
 
 module.exports = {
   checkIn,
